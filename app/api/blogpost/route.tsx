@@ -1,3 +1,5 @@
+//app/api/blogpost/route.tsx
+
 import { NextResponse } from "next/server";
 import prisma from "@/prisma/prisma";
 import type { Prisma } from "@prisma/client";
@@ -332,10 +334,38 @@ export async function GET(req: Request) {
     // ✅ LIST MODE (global image-first + NO hard cap)
     const mode = searchParams.get("mode");
     if (mode === "dashboard") {
-      const posts = await prisma.blogPost.findMany({
+      // ✅ For dashboard, support pagination parameters but fetch ALL blogs for client-side filtering
+      const page = Math.max(1, Number(searchParams.get("page") || 1));
+      const limit = Math.max(1, Number(searchParams.get("limit") || 9)); // Default 9 per page
+      const skip = (page - 1) * limit;
+      
+      const q = (searchParams.get("q") || "").trim(); // ✅ Search support for dashboard
+      const statusFilter = (searchParams.get("status") || "").trim(); // ✅ Status filter support
+      
+      const filters: Prisma.BlogPostWhereInput = {};
+      if (q) {
+        filters.OR = [
+          { post_title: { contains: q, mode: "insensitive" } },
+          { category: { contains: q, mode: "insensitive" } },
+          { tags: { contains: q, mode: "insensitive" } },
+        ];
+      }
+      
+      // ✅ Add status filter (case-insensitive)
+      if (statusFilter && statusFilter !== "all") {
+        filters.post_status = {
+          equals: statusFilter,
+          mode: "insensitive"
+        };
+      }
+
+      // ✅ Fetch ALL blogs for client-side filtering
+      const allPosts = await prisma.blogPost.findMany({
+        where: filters,
         select: {
           id: true,
           post_title: true,
+          post_content: true, // ✅ Add for thumbnail extraction
           comment_status: true,
           createdAt: true,
           post_date: true,
@@ -344,7 +374,31 @@ export async function GET(req: Request) {
         orderBy: { createdAt: "desc" },
       });
 
-      return NextResponse.json({ data: posts, meta: { total: posts.length } });
+      // ✅ Add imageUrl processing for dashboard
+      const postsWithImages = allPosts.map(post => {
+        const rawContent = extractContent(post.post_content);
+        const { imageUrl } = computeMetaFromContent(rawContent);
+        return {
+          ...post,
+          post_content: rawContent,
+          imageUrl,
+        };
+      });
+
+      // ✅ Apply pagination on the processed data for API response
+      const total = postsWithImages.length;
+      const totalPages = Math.ceil(total / limit) || 1;
+      const paginatedData = postsWithImages.slice(skip, skip + limit);
+
+      return NextResponse.json({ 
+        data: paginatedData, 
+        meta: { 
+          total,
+          page,
+          limit,
+          totalPages,
+        } 
+      });
     }
 
     const titlesOnly = searchParams.get("titles");
@@ -373,6 +427,11 @@ export async function GET(req: Request) {
     const filters: Prisma.BlogPostWhereInput = {};
     if (category) filters.category = category;
     if (authorId) filters.post_author = parseInt(authorId, 10);
+
+    // ✅ For public requests, only show published posts
+    if (!mode || mode !== "dashboard") {
+      filters.post_status = "publish";
+    }
 
     // ✅ SAFE prisma search (title/category/tags only)
     if (q) {

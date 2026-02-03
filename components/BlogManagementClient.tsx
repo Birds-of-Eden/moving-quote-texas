@@ -130,6 +130,7 @@ const AdminBlogCard: React.FC<{
 
   return (
     <div className="bg-white rounded-2xl overflow-hidden shadow-xl hover:shadow-2xl transition-all duration-300 border border-gray-100 flex flex-col">
+      {/* NOTE: this link might not match your public slug routing, but kept as-is */}
       <Link href={`/blog/${post.id}`} className="group">
         <div className="relative w-full h-48 overflow-hidden">
           <Image
@@ -216,9 +217,11 @@ const BlogManagementClient: React.FC<{
 
   const [searchQuery, setSearchQuery] = useState("");
 
+  type StatusFilter = "all" | "publish" | "draft" | "unpublish";
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
+
   const [currentPage, setCurrentPage] = useState(initialMeta.page || 1);
   const [totalPages, setTotalPages] = useState(initialMeta.totalPages || 1);
-  const [totalBlogs, setTotalBlogs] = useState(initialMeta.total || 0);
 
   const [blogs, setBlogs] = useState<Blog[]>(() => {
     const list = initialBlogs || [];
@@ -236,7 +239,7 @@ const BlogManagementClient: React.FC<{
 
   useEffect(() => {
     setCurrentPage(1);
-  }, [searchQuery]);
+  }, [searchQuery, statusFilter]);
 
   useEffect(() => {
     if (!didSkipInitial.current && currentPage === initialMeta.page && !searchQuery) {
@@ -252,9 +255,11 @@ const BlogManagementClient: React.FC<{
 
       try {
         const qs = new URLSearchParams();
+        qs.set("mode", "dashboard"); // ✅ IMPORTANT: admin sees ALL statuses
         qs.set("page", String(currentPage));
         qs.set("limit", String(itemsPerPage));
         if (searchQuery.trim()) qs.set("q", searchQuery.trim());
+        if (statusFilter !== "all") qs.set("status", statusFilter); // ✅ Send status filter to API
 
         const res = await fetch(`/api/blogpost?${qs.toString()}`, {
           signal: controller.signal,
@@ -269,26 +274,17 @@ const BlogManagementClient: React.FC<{
           ? json
           : (json as BlogResponse).data || (json as BlogResponse).items || [];
 
-        const meta: BlogMeta = Array.isArray(json)
-          ? {
-              page: currentPage,
-              limit: itemsPerPage,
-              total: list.length,
-              totalPages: Math.max(1, Math.ceil(list.length / itemsPerPage)),
-            }
-          : (json as BlogResponse).meta || {
-              page: currentPage,
-              limit: itemsPerPage,
-              total: list.length,
-              totalPages: 1,
-            };
-
         const mapped: Blog[] = list.map(mapApiToBlog);
 
         startTransition(() => {
           setBlogs(mapped);
-          setTotalPages(meta.totalPages || 1);
-          setTotalBlogs(meta.total || mapped.length);
+          // ✅ Update totalPages from server response
+          if (json && typeof json === 'object' && 'meta' in json) {
+            const meta = (json as BlogResponse).meta;
+            if (meta?.totalPages) {
+              setTotalPages(meta.totalPages);
+            }
+          }
         });
       } catch (e: unknown) {
         if (!isAbortError(e)) {
@@ -302,13 +298,36 @@ const BlogManagementClient: React.FC<{
 
     fetchPageBlogs();
     return () => controller.abort();
-  }, [currentPage, itemsPerPage, reloadTick, initialMeta.page, searchQuery]);
+  }, [currentPage, itemsPerPage, reloadTick, initialMeta.page, searchQuery, statusFilter]);
 
-  const filteredPosts = useMemo(() => {
-    const q = searchQuery.toLowerCase().trim();
-    if (!q) return blogs;
-    return blogs.filter((b) => (b._searchTitle || "").includes(q));
-  }, [blogs, searchQuery]);
+  const [statusCounts, setStatusCounts] = useState({ all: 0, publish: 0, draft: 0, unpublish: 0 });
+
+  // ✅ Fetch status counts for all blogs
+  const fetchStatusCounts = useCallback(async () => {
+    try {
+      const res = await fetch(`/api/blogpost?mode=dashboard&limit=1000`, {
+        cache: "no-store",
+      });
+      if (res.ok) {
+        const json: BlogResponse = await res.json();
+        const allBlogs = (json.data || []).map(mapApiToBlog);
+        
+        const counts = { all: allBlogs.length, publish: 0, draft: 0, unpublish: 0 };
+        for (const b of allBlogs) {
+          const s = String(b.post_status ?? "unpublish").toLowerCase().trim() as StatusFilter;
+          if (s === "publish" || s === "draft" || s === "unpublish") counts[s]++;
+        }
+        setStatusCounts(counts);
+      }
+    } catch (e) {
+      console.error("Failed to fetch status counts:", e);
+    }
+  }, []);
+
+  // ✅ Fetch status counts on initial load
+  useEffect(() => {
+    fetchStatusCounts();
+  }, [fetchStatusCounts]);
 
   const handleCreateNewClick = useCallback(() => {
     setEditBlogData(null);
@@ -318,7 +337,9 @@ const BlogManagementClient: React.FC<{
   const handleEditClick = useCallback(async (blog: Blog) => {
     if (!blog.post_content) {
       try {
-        const res = await fetch(`/api/blogpost?id=${blog.id}`, { cache: "no-store" });
+        const res = await fetch(`/api/blogpost?mode=dashboard&id=${blog.id}`, {
+          cache: "no-store",
+        });
         if (res.ok) {
           const full: unknown = await res.json();
           blog = mapApiToBlog(full);
@@ -344,13 +365,15 @@ const BlogManagementClient: React.FC<{
         if (!response.ok) throw new Error("Failed to delete");
 
         alert("Blog post deleted successfully!");
+        fetchStatusCounts(); // ✅ Update status counts
         forceReload();
       } catch {
         alert("Failed to delete blog post. Please try again.");
+        fetchStatusCounts(); // ✅ Update status counts
         forceReload();
       }
     },
-    [forceReload]
+    [forceReload, fetchStatusCounts]
   );
 
   /** ✅ publish/unpublish -> SAVE to DB field post_status */
@@ -376,7 +399,7 @@ const BlogManagementClient: React.FC<{
 
         if (!res.ok) {
           console.error("PUT failed:", res.status, payload);
-          throw new Error(payload?.error || "Failed to update status");
+          throw new Error((payload as any)?.error || "Failed to update status");
         }
 
         // server/DB truth -> UI sync
@@ -386,7 +409,8 @@ const BlogManagementClient: React.FC<{
         } else {
           forceReload();
         }
-      } catch (e) {
+        fetchStatusCounts(); // ✅ Update status counts
+      } catch {
         // rollback
         setBlogs((prev) =>
           prev.map((b) =>
@@ -400,9 +424,10 @@ const BlogManagementClient: React.FC<{
           )
         );
         alert("DB update failed. Please try again.");
+        fetchStatusCounts(); // ✅ Update status counts
       }
     },
-    [forceReload]
+    [forceReload, fetchStatusCounts]
   );
 
   const handleCloseModal = useCallback(() => {
@@ -415,8 +440,11 @@ const BlogManagementClient: React.FC<{
     setEditBlogData(null);
 
     if (currentPage !== 1) setCurrentPage(1);
-    else forceReload();
-  }, [currentPage, forceReload]);
+    else {
+      fetchStatusCounts(); // ✅ Update status counts
+      forceReload();
+    }
+  }, [currentPage, forceReload, fetchStatusCounts]);
 
   const paginate = (p: number) => {
     if (p < 1 || p > totalPages) return;
@@ -445,7 +473,33 @@ const BlogManagementClient: React.FC<{
     <div className="p-6 bg-gray-100 min-h-screen font-sans">
       <div className="flex flex-col md:flex-row md:justify-between md:items-center gap-4 mb-6">
         <h1 className="text-3xl font-bold">Blog Management</h1>
-        <div className="flex gap-3">
+        <div className="flex flex-wrap items-center gap-3">
+          <div className="flex gap-2 flex-wrap">
+            {(["all", "publish", "draft", "unpublish"] as const).map((s) => (
+              <button
+                key={s}
+                onClick={() => setStatusFilter(s)}
+                className={`px-3 py-2 text-sm font-semibold rounded-lg border transition ${
+                  statusFilter === s
+                    ? "bg-indigo-600 text-white border-indigo-600"
+                    : "bg-white text-gray-700 border-gray-300 hover:bg-gray-50"
+                }`}
+              >
+                {s === "all" ? "All" : s === "publish" ? "Published" : s === "draft" ? "Draft" : "Unpublished"}
+                <span className="ml-2 text-xs opacity-80">
+                  (
+                  {s === "all"
+                    ? statusCounts.all
+                    : s === "publish"
+                    ? statusCounts.publish
+                    : s === "draft"
+                    ? statusCounts.draft
+                    : statusCounts.unpublish}
+                  )
+                </span>
+              </button>
+            ))}
+          </div>
           <input
             type="text"
             placeholder="Search title..."
@@ -470,24 +524,16 @@ const BlogManagementClient: React.FC<{
         </div>
       )}
 
-      <div className="flex justify-between items-center mt-4 mb-4">
-        <h2 className="text-xl font-bold">
-          Our Blogs: <span className="text-cyan-600">{totalBlogs}</span>
-        </h2>
-        <span className="text-sm text-slate-500">
-          Page {currentPage} of {totalPages}
-        </span>
-      </div>
 
       <section className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8">
         {pageLoading && blogs.length === 0 ? (
           Array.from({ length: itemsPerPage }).map((_, i) => <SkeletonCard key={i} />)
-        ) : filteredPosts.length === 0 ? (
+        ) : blogs.length === 0 ? (
           <div className="col-span-full text-center text-gray-500 py-10">
             No posts found.
           </div>
         ) : (
-          filteredPosts.map((post) => (
+          blogs.map((post: Blog) => (
             <AdminBlogCard
               key={post.id}
               post={post}
@@ -586,7 +632,7 @@ export default BlogManagementClient;
 
 /** ---------- helpers ---------- */
 function mapApiToBlog(item: unknown): Blog {
-  const obj = (item ?? {}) as Record<string, unknown>;
+  const obj = (item ?? {}) as Record<string, any>;
 
   const rawPostContent = obj.post_content;
   const rawContent =
@@ -617,12 +663,11 @@ function mapApiToBlog(item: unknown): Blog {
   const imageUrl = (apiImage as string | null) || contentImage || null;
 
   const firstLine = getFirstLine(rawContent);
-  const excerpt = firstLine.slice(0, 160);
+  const excerpt = (obj.excerpt ? String(obj.excerpt) : firstLine).slice(0, 160);
 
   const wordCount = rawContent.split(/\s+/).filter(Boolean).length;
-  const readTime = Math.max(1, Math.ceil(wordCount / 200));
+  const readTime = Number(obj.readTime) || Math.max(1, Math.ceil(wordCount / 200));
 
-  // ✅ IMPORTANT: DB uses "publish" not "published"
   const status = String(obj.post_status ?? "unpublish").toLowerCase().trim();
   const isPublished = status === "publish";
 

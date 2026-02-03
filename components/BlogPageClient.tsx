@@ -97,7 +97,6 @@ const BlogCard: React.FC<{ post: Blog }> = React.memo(({ post }) => {
   const safeImg = normalizeImageUrl(post.imageUrl);
   const postSlug = useMemo(() => slugify(post.post_title || ""), [post.post_title]);
 
-  // ✅ blog details route is "/{slug}"
   const href = `/${encodeURIComponent(postSlug)}`;
 
   return (
@@ -140,13 +139,6 @@ function isAbortError(err: unknown) {
   return err instanceof DOMException && err.name === "AbortError";
 }
 
-// ✅ helper: keep only published posts
-function onlyPublished(list: Blog[]) {
-  return (list || []).filter(
-    (p) => String(p.post_status || "").toLowerCase().trim() === "publish"
-  );
-}
-
 export default function BlogPageClient({
   initialBlogs,
   initialMeta,
@@ -158,10 +150,12 @@ export default function BlogPageClient({
 }) {
   const initialPage = initialMeta.page || 1;
 
-  // ✅ filter initial blogs too (SSR initial list)
-  const [blogs, setBlogs] = useState<Blog[]>(() => onlyPublished(initialBlogs));
+  // ✅ No need to filter since API only returns published posts
+  const [blogs, setBlogs] = useState<Blog[]>(initialBlogs);
 
   const [currentPage, setCurrentPage] = useState(initialPage);
+
+  // ✅ IMPORTANT: start with meta, but will be corrected below safely
   const [totalPages, setTotalPages] = useState(initialMeta.totalPages || 1);
 
   const [pageLoading, setPageLoading] = useState(false);
@@ -171,10 +165,50 @@ export default function BlogPageClient({
   const didMountRef = useRef(false);
   const pageCacheRef = useRef<Map<number, Blog[]>>(new Map());
 
-  // ✅ cache initial page (filtered)
+  // ✅ cache initial page (no filtering needed)
   useEffect(() => {
-    pageCacheRef.current.set(initialPage, onlyPublished(initialBlogs));
+    pageCacheRef.current.set(initialPage, initialBlogs);
   }, [initialPage, initialBlogs]);
+
+  /**
+   * ✅ If a fetched page has 0 published posts, it should not create pagination.
+   * We shrink totalPages to the last page that actually has published posts.
+   * (Especially useful if API meta is stale/wrong)
+   */
+  const findLastNonEmptyPublishedPage = useCallback(
+    async (apiTotalPages: number) => {
+      let p = Math.max(1, apiTotalPages);
+
+      while (p > 1) {
+        const cached = pageCacheRef.current.get(p);
+        if (cached && cached.length > 0) return p;
+        if (cached && cached.length === 0) {
+          p--;
+          continue;
+        }
+
+        try {
+          const res = await fetch(`/api/blogpost?page=${p}&limit=${postsPerPage}`, {
+            cache: "no-store",
+          });
+          if (!res.ok) break;
+
+          const json: BlogResponse = await res.json();
+          const pageData = json.data || [];
+          pageCacheRef.current.set(p, pageData);
+
+          if (pageData.length > 0) return p;
+        } catch {
+          break;
+        }
+
+        p--;
+      }
+
+      return 1;
+    },
+    [postsPerPage]
+  );
 
   const fetchPage = useCallback(
     async (page: number, controller: AbortController) => {
@@ -190,24 +224,31 @@ export default function BlogPageClient({
 
         const json: BlogResponse = await res.json();
 
-        // ✅ filter here so unpublished never shows
-        const publishedOnly = onlyPublished(json.data || []);
+        const pageData = json.data || [];
+        pageCacheRef.current.set(page, pageData);
 
-        pageCacheRef.current.set(page, publishedOnly);
+        // ✅ Fix totalPages based on API response
+        const apiTotal = json.meta?.totalPages || 1;
+        const trimmedLast = await findLastNonEmptyPublishedPage(apiTotal);
 
         startTransition(() => {
-          setBlogs(publishedOnly);
-          setTotalPages(json.meta?.totalPages || 1);
+          setBlogs(pageData);
+          setTotalPages(trimmedLast);
         });
 
-        // ✅ prefetch next page silently (cache filtered)
-        if (page < (json.meta?.totalPages || 1)) {
+        // ✅ If this page has no posts, jump back safely
+        if (pageData.length === 0 && page > 1) {
+          setCurrentPage((prev) => Math.min(prev - 1, trimmedLast));
+        }
+
+        // ✅ prefetch next page silently
+        if (page < trimmedLast) {
           fetch(`/api/blogpost?page=${page + 1}&limit=${postsPerPage}`, {
             cache: "no-store",
           })
             .then((r) => r.json())
             .then((nextJson: BlogResponse) => {
-              pageCacheRef.current.set(page + 1, onlyPublished(nextJson.data || []));
+              pageCacheRef.current.set(page + 1, nextJson.data || []);
             })
             .catch(() => {});
         }
@@ -220,8 +261,18 @@ export default function BlogPageClient({
         setPageLoading(false);
       }
     },
-    [postsPerPage, startTransition]
+    [postsPerPage, startTransition, findLastNonEmptyPublishedPage]
   );
+
+  // ✅ On mount: shrink totalPages based on real published pages (safety)
+  useEffect(() => {
+    (async () => {
+      const trimmedLast = await findLastNonEmptyPublishedPage(initialMeta.totalPages || 1);
+      setTotalPages(trimmedLast);
+      setCurrentPage((p) => (p > trimmedLast ? trimmedLast : p));
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialMeta.totalPages]);
 
   useEffect(() => {
     if (!didMountRef.current) {
