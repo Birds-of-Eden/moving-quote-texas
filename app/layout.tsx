@@ -18,7 +18,7 @@ export const metadata: Metadata = {
   title: "Moving Quote Taxes",
   description: "Home changing service in Moving Taxes",
   icons: {
-    icon: "/image/mini-logo.png",
+    icon: "/image/mini-Logo.png",
   },
 };
 
