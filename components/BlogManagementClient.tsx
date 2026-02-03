@@ -146,7 +146,7 @@ const AdminBlogCard: React.FC<{
 
       <div className="p-6 flex flex-col flex-1">
         <span className="text-xs font-semibold uppercase text-indigo-600 tracking-widest mb-2">
-          {post.post_category || "Uncategorized"}
+          {post.post_category && post.post_category.trim() ? post.post_category.trim() : "Uncategorized"}
         </span>
 
         <h2 className="text-xl font-bold text-gray-900 leading-tight mb-2 line-clamp-2">

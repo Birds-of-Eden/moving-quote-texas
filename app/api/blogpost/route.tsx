@@ -366,6 +366,7 @@ export async function GET(req: Request) {
           id: true,
           post_title: true,
           post_content: true, // ✅ Add for thumbnail extraction
+          category: true, // ✅ Add category field
           comment_status: true,
           createdAt: true,
           post_date: true,
@@ -382,6 +383,7 @@ export async function GET(req: Request) {
           ...post,
           post_content: rawContent,
           imageUrl,
+          post_category: post.category || "Uncategorized", // ✅ Add category mapping
         };
       });
 
@@ -490,7 +492,7 @@ export async function GET(req: Request) {
       if (a._hasRealImage !== b._hasRealImage) {
         return Number(b._hasRealImage) - Number(a._hasRealImage);
       }
-      return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+      return new Date(b.createdAt || new Date()).getTime() - new Date(a.createdAt || new Date()).getTime();
     });
 
     const total = sortable.length;
