@@ -2,6 +2,7 @@ import { notFound } from "next/navigation";
 import Link from "next/link";
 import type { Metadata } from "next";
 import BlogPostEditorClient from "./BlogPostEditorClient";
+import MovingCalculator from "@/components/MovingCostCalculator";
 
 const SITE_URL_RAW =
   process.env.NEXT_PUBLIC_BASE_URL ?? "https://movingquotetexas.com/";
@@ -238,7 +239,7 @@ export default async function Page(props: {
 
         {/* RIGHT RECENT BLOGS */}
         <aside className="order-3 lg:order-3 lg:col-span-2 xl:col-span-3 2xl:col-span-2 mt-2 lg:mt-0 min-w-0">
-          <div className="lg:sticky lg:top-6 space-y-6">
+          {/* <div className="lg:sticky lg:top-6 space-y-6">
             <div className="p-5 sm:p-6 border border-slate-100 rounded-xl bg-white shadow-sm">
               <h3 className="text-lg font-bold text-slate-900 mb-4">New Blogs</h3>
 
@@ -291,8 +292,13 @@ export default async function Page(props: {
                 </Link>
               </div>
             </div>
+          </div> */}
+          <div className="fixed pr-5">
+            <MovingCalculator/>
           </div>
+          
         </aside>
+        
 
         {/* MOBILE ADS */}
         <div className="order-4 lg:hidden">
